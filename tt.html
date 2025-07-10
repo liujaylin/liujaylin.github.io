@@ -1,0 +1,324 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8">
+    <title>Three.js 最终效果：被四棱锥精确裁剪的圆锥（已修复）</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #000; }
+        canvas { display: block; }
+    </style>
+</head>
+<body>
+<script type="importmap">
+    {
+        "imports": {
+            "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+            "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+        }
+    }
+</script>
+
+<script type="module">
+    import * as THREE from 'three';
+    import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+    import {DoubleSide} from "three";
+
+    // --- 1. 场景、相机和渲染器设置 ---
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+    camera.position.set(0, 2.5, 5.0);
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    document.body.appendChild(renderer.domElement);
+
+    // --- 2. 控制器和光照 ---
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
+    scene.add(ambientLight);
+    const directionalLight = new THREE.DirectionalLight(0xffffff, 1);
+    directionalLight.position.set(5, 5, 5);
+    scene.add(directionalLight);
+
+    // --- 3. 创建地球 ---
+    const earthRadius = 1.0;
+    const earthGeometry = new THREE.SphereGeometry(earthRadius, 64, 64);
+    const earthMaterial = new THREE.MeshStandardMaterial({ color: 0x4da6ff, roughness: 0.8 });
+    const earth = new THREE.Mesh(earthGeometry, earthMaterial);
+    scene.add(earth);
+
+    // --- 4. 创建卫星组 ---
+    const satelliteGroup = new THREE.Group();
+    scene.add(satelliteGroup);
+    const satelliteInitialDistance = 3.0;
+    satelliteGroup.position.set(0, 0, satelliteInitialDistance);
+    satelliteGroup.lookAt(earth.position);
+
+    // 卫星模型
+    const satelliteSphere = new THREE.Mesh(
+        new THREE.SphereGeometry(0.05, 16, 16),
+        new THREE.MeshStandardMaterial({ color: 0xffffff, emissive: 0xffffff })
+    );
+    satelliteGroup.add(satelliteSphere);
+
+    // --- 5. 创建原始的四棱锥 (scanMesh) ---
+    const scanGeometry = new THREE.BufferGeometry();
+    const apex = [0.0, 0.0, 0.0];
+    const baseV1 = new THREE.Vector3(-1.5, -4.0, 1.5);
+    const baseV2 = new THREE.Vector3(1.5, -4.0, 1.5);
+    const baseV3 = new THREE.Vector3(1.5, -4.0, -1.5);
+    const baseV4 = new THREE.Vector3(-1.5, -4.0, -1.5);
+
+    const vertices = new Float32Array([
+        ...apex, ...baseV1.toArray(), ...baseV2.toArray(),
+        ...apex, ...baseV2.toArray(), ...baseV3.toArray(),
+        ...apex, ...baseV3.toArray(), ...baseV4.toArray(),
+        ...apex, ...baseV4.toArray(), ...baseV1.toArray(),
+        ...baseV1.toArray(), ...baseV3.toArray(), ...baseV2.toArray(),
+        ...baseV1.toArray(), ...baseV4.toArray(), ...baseV3.toArray()
+    ]);
+    scanGeometry.setAttribute('position', new THREE.BufferAttribute(vertices, 3));
+    const barycentric = new Float32Array(vertices.length);
+    for (let i = 0; i < barycentric.length / 9; i++) {
+        barycentric.set([1,0,0, 0,1,0, 0,0,1], i * 9);
+    }
+    scanGeometry.setAttribute('barycentric', new THREE.BufferAttribute(barycentric, 3));
+
+    const baseScanMaterial = new THREE.ShaderMaterial({
+        uniforms: {
+            strokeColor: { value: new THREE.Color(0xff0000) },
+            fillColor: { value: new THREE.Color(0x00ff00) },
+            fillOpacity: { value: 0.2 },
+            earthCenter: { value: earth.position },
+            earthRadius: { value: earthRadius },
+            satellitePosition: { value: new THREE.Vector3() }
+        },
+        vertexShader: `
+            in vec3 barycentric; out vec3 vBarycentric; out vec3 vWorldPosition;
+            void main() {
+                vec4 worldPosition = modelMatrix * vec4(position, 1.0);
+                vWorldPosition = worldPosition.xyz; vBarycentric = barycentric;
+                gl_Position = projectionMatrix * viewMatrix * worldPosition;
+            }
+        `,
+        fragmentShader: `
+            in vec3 vBarycentric; in vec3 vWorldPosition;
+            uniform vec3 strokeColor; uniform vec3 fillColor; uniform float fillOpacity;
+            uniform vec3 earthCenter; uniform float earthRadius; uniform vec3 satellitePosition;
+            out vec4 FragColor;
+            float checkLineOfSightOcclusion() {
+                if (distance(vWorldPosition, satellitePosition) < 0.001) return 0.0;
+                vec3 rayDir = normalize(vWorldPosition - satellitePosition);
+                vec3 oc = satellitePosition - earthCenter;
+                float b = dot(oc, rayDir); float c = dot(oc, oc) - earthRadius * earthRadius;
+                float h = b*b - c;
+                if (h > 0.0) {
+                    float t = -b - sqrt(h);
+                    if (t > 0.001 && t < distance(vWorldPosition, satellitePosition)) return 1.0;
+                }
+                return 0.0;
+            }
+            void main() {
+                if (checkLineOfSightOcclusion() > 0.5) discard;
+                float d_bary = min(min(vBarycentric.x, vBarycentric.y), vBarycentric.z);
+                bool onTriStroke = d_bary < fwidth(d_bary) * 2.0;
+                float sphereSDF = distance(vWorldPosition, earthCenter) - earthRadius;
+                bool onSphereIntersectStroke = abs(sphereSDF) < fwidth(sphereSDF) * 2.0;
+                FragColor = onTriStroke || onSphereIntersectStroke ? vec4(strokeColor, 1.0) : vec4(fillColor, fillOpacity);
+            }
+        `,
+        transparent: true,
+        glslVersion: THREE.GLSL3,
+        side: DoubleSide,
+        depthWrite: false
+    });
+
+    const scanMesh = new THREE.Mesh(scanGeometry, baseScanMaterial);
+    scanMesh.rotation.x = -Math.PI / 2;
+    satelliteGroup.add(scanMesh);
+
+    // --- 6. 创建新增的、以地球为内切球的圆锥 ---
+    function createTangentCone(satellitePos, earthPos, earthRad) {
+        const distance = satellitePos.distanceTo(earthPos);
+        if (distance <= earthRad) return null;
+        const tanAlpha = earthRad / Math.sqrt(distance * distance - earthRad * earthRad);
+        const coneHeight = distance * 1.5;
+        const coneRadius = coneHeight * tanAlpha;
+        const coneGeometry = new THREE.ConeGeometry(coneRadius, coneHeight, 64, 1, true);
+        coneGeometry.translate(0, -coneHeight / 2, 0);
+        coneGeometry.rotateX(-Math.PI / 2);
+        return coneGeometry;
+    }
+
+    let coneGeometry = createTangentCone(satelliteGroup.position, earth.position, earthRadius);
+
+    const coneMaterial = new THREE.ShaderMaterial({
+        uniforms: {
+            fillColor: { value: new THREE.Color(0x00ff00) },
+            fillOpacity: { value: 0.3 },
+            strokeColor: { value: new THREE.Color(0xff0000) },
+            earthCenter: { value: earth.position },
+            earthRadius: { value: earthRadius },
+            tangentPlaneDistance: { value: 0.0 },
+            satellitePosition: { value: new THREE.Vector3() },
+            groupInverseMatrix: { value: new THREE.Matrix4() },
+            pyramidApex: { value: new THREE.Vector3() },
+            pyramidV1: { value: new THREE.Vector3() },
+            pyramidV2: { value: new THREE.Vector3() },
+            pyramidV3: { value: new THREE.Vector3() },
+            pyramidV4: { value: new THREE.Vector3() },
+        },
+        vertexShader: `
+            out vec3 vWorldPosition; out vec3 vLocalPosition;
+            void main() {
+                vLocalPosition = position;
+                vec4 worldPosition = modelMatrix * vec4(position, 1.0);
+                vWorldPosition = worldPosition.xyz;
+                gl_Position = projectionMatrix * viewMatrix * worldPosition;
+            }
+        `,
+        fragmentShader: `
+            in vec3 vWorldPosition; in vec3 vLocalPosition;
+            uniform vec3 fillColor; uniform float fillOpacity;
+            uniform vec3 strokeColor;
+            uniform vec3 earthCenter; uniform float earthRadius;
+            uniform float tangentPlaneDistance;
+            uniform vec3 satellitePosition;
+            uniform mat4 groupInverseMatrix;
+            uniform vec3 pyramidApex;
+            uniform vec3 pyramidV1;
+            uniform vec3 pyramidV2;
+            uniform vec3 pyramidV3;
+            uniform vec3 pyramidV4;
+            out vec4 FragColor;
+
+            // 辅助函数：计算点到平面的有符号距离
+            float signed_distance_to_plane(vec3 p, vec3 a, vec3 b, vec3 c, vec3 test_p) {
+                vec3 n = normalize(cross(b - a, c - a));
+                if (dot(n, test_p - a) > 0.0) {
+                    n = -n;
+                }
+                return dot(n, p - a);
+            }
+
+            void main() {
+                // 将世界坐标转换回四棱锥所在的局部空间
+                vec3 p = (groupInverseMatrix * vec4(vWorldPosition, 1.0)).xyz;
+
+                vec3 apex = pyramidApex;
+                vec3 v1 = pyramidV1;
+                vec3 v2 = pyramidV2;
+                vec3 v3 = pyramidV3;
+                vec3 v4 = pyramidV4;
+
+                vec3 base_center = (v1 + v2 + v3 + v4) * 0.25;
+
+                float d_cone = vLocalPosition.z - tangentPlaneDistance;
+                float d1 = signed_distance_to_plane(p, apex, v1, v2, base_center);
+                float d2 = signed_distance_to_plane(p, apex, v2, v3, base_center);
+                float d3 = signed_distance_to_plane(p, apex, v3, v4, base_center);
+                float d4 = signed_distance_to_plane(p, apex, v4, v1, base_center);
+                float d5 = signed_distance_to_plane(p, v1, v3, v2, apex);
+
+                // --- 核心修正：使用 fwidth 动态计算边界宽度，消除缝隙 ---
+                // 使用 fwidth 来创建1像素宽的平滑过渡，用于抗锯齿
+                float alpha_cone = smoothstep(-fwidth(d_cone), fwidth(d_cone), d_cone);
+                float alpha1 = smoothstep(-fwidth(d1), fwidth(d1), -d1);
+                float alpha2 = smoothstep(-fwidth(d2), fwidth(d2), -d2);
+                float alpha3 = smoothstep(-fwidth(d3), fwidth(d3), -d3);
+                float alpha4 = smoothstep(-fwidth(d4), fwidth(d4), -d4);
+                float alpha5 = smoothstep(-fwidth(d5), fwidth(d5), -d5);
+
+                // 合并所有 alpha 值，取最小值得到最终的形状
+                float alpha = min(alpha_cone, min(alpha1, min(alpha2, min(alpha3, min(alpha4, alpha5)))));
+
+                // 如果 alpha 过低，说明在形状外部，直接抛弃片段，提高效率
+                if (alpha < 0.01) discard;
+
+                // --- 判断是否在描边上 ---
+                bool onPyramidIntersect =
+                    abs(d1) < fwidth(d1) * 1.5 ||
+                    abs(d2) < fwidth(d2) * 1.5 ||
+                    abs(d3) < fwidth(d3) * 1.5 ||
+                    abs(d4) < fwidth(d4) * 1.5 ||
+                    abs(d5) < fwidth(d5) * 1.5;
+
+                float sphereSDF = distance(vWorldPosition, earthCenter) - earthRadius;
+                bool onEarthIntersection = abs(sphereSDF) < fwidth(sphereSDF) * 1.5;
+
+                // 将所有描边条件合并
+                bool isStroked = onEarthIntersection || onPyramidIntersect;
+
+                // 根据是否描边决定基础颜色
+                vec4 finalColor = isStroked ? vec4(strokeColor, 1.0) : vec4(fillColor, fillOpacity);
+
+                // 将最终的 alpha 应用到颜色上
+                // 这会使填充区域有平滑的边缘，并且描边也会在最边缘处平滑地融入
+                finalColor.a *= alpha;
+
+                FragColor = finalColor;
+            }
+        `,
+        transparent: true, side: THREE.DoubleSide, glslVersion: THREE.GLSL3, depthWrite: true
+    });
+
+    const coneMesh = new THREE.Mesh(coneGeometry, coneMaterial);
+    satelliteGroup.add(coneMesh);
+
+    // --- 7. 动画循环 ---
+    const clock = new THREE.Clock();
+    const satelliteWorldPos = new THREE.Vector3();
+
+    function animate() {
+        requestAnimationFrame(animate);
+        const elapsedTime = clock.getElapsedTime();
+
+        satelliteGroup.position.x = Math.sin(elapsedTime * 0.2) * satelliteInitialDistance;
+        satelliteGroup.position.z = Math.cos(elapsedTime * 0.2) * satelliteInitialDistance;
+        satelliteGroup.lookAt(earth.position);
+        satelliteGroup.getWorldPosition(satelliteWorldPos);
+
+        const rotationZ = Math.sin(elapsedTime * 0.8) * 0.4;
+        const rotationX = -Math.PI / 2 + Math.cos(elapsedTime * 0.6) * 0.3;
+
+        scanMesh.rotation.z = rotationZ;
+        scanMesh.rotation.x = rotationX;
+        baseScanMaterial.uniforms.satellitePosition.value.copy(satelliteWorldPos);
+
+        const newConeGeometry = createTangentCone(satelliteGroup.position, earth.position, earthRadius);
+        if (newConeGeometry) {
+            coneMesh.geometry.dispose();
+            coneMesh.geometry = newConeGeometry;
+        }
+
+        const dist = satelliteGroup.position.length();
+        const tangentPlaneDist = (dist * dist - earthRadius * earthRadius) / dist;
+        coneMaterial.uniforms.tangentPlaneDistance.value = tangentPlaneDist;
+        coneMaterial.uniforms.satellitePosition.value.copy(satelliteWorldPos);
+
+        satelliteGroup.updateWorldMatrix(true, true);
+        coneMaterial.uniforms.groupInverseMatrix.value.copy(satelliteGroup.matrixWorld).invert();
+
+        scanMesh.updateMatrix();
+        const pyramidMatrix = scanMesh.matrix;
+        coneMaterial.uniforms.pyramidApex.value.set(0,0,0);
+        coneMaterial.uniforms.pyramidV1.value.copy(baseV1).applyMatrix4(pyramidMatrix);
+        coneMaterial.uniforms.pyramidV2.value.copy(baseV2).applyMatrix4(pyramidMatrix);
+        coneMaterial.uniforms.pyramidV3.value.copy(baseV3).applyMatrix4(pyramidMatrix);
+        coneMaterial.uniforms.pyramidV4.value.copy(baseV4).applyMatrix4(pyramidMatrix);
+
+        controls.update();
+        renderer.render(scene, camera);
+    }
+
+    animate();
+
+    // --- 8. 响应窗口大小调整 ---
+    window.addEventListener('resize', () => {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+</script>
+</body>
+</html>
