@@ -1,0 +1,536 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>SAR 合成孔径雷达覆盖模拟</title>
+    <style>
+        body { 
+            margin: 0; 
+            overflow: hidden; 
+            background-color: #000; 
+            font-family: Arial, sans-serif;
+        }
+        canvas { display: block; }
+        
+        #controls {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 20px;
+            border-radius: 8px;
+            color: white;
+            min-width: 280px;
+            z-index: 100;
+        }
+        
+        #controls h2 {
+            margin-top: 0;
+            margin-bottom: 15px;
+            font-size: 18px;
+            border-bottom: 2px solid #4da6ff;
+            padding-bottom: 8px;
+        }
+        
+        .control-group {
+            margin-bottom: 15px;
+        }
+        
+        .control-group label {
+            display: block;
+            margin-bottom: 5px;
+            font-size: 14px;
+            color: #aaa;
+        }
+        
+        .control-group input[type="range"] {
+            width: 100%;
+            margin-top: 5px;
+        }
+        
+        .control-group input[type="checkbox"] {
+            margin-right: 8px;
+            width: 18px;
+            height: 18px;
+            cursor: pointer;
+            vertical-align: middle;
+        }
+        
+        .checkbox-label {
+            font-size: 14px;
+            cursor: pointer;
+            display: inline-flex;
+            align-items: center;
+        }
+        
+        .value-display {
+            color: #4da6ff;
+            font-weight: bold;
+        }
+        
+        #info {
+            position: absolute;
+            bottom: 20px;
+            left: 20px;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 15px;
+            border-radius: 8px;
+            color: white;
+            font-size: 12px;
+            max-width: 300px;
+        }
+        
+        #info h3 {
+            margin-top: 0;
+            margin-bottom: 10px;
+            font-size: 14px;
+            color: #4da6ff;
+        }
+    </style>
+</head>
+<body>
+<div id="controls">
+    <h2>SAR 控制面板</h2>
+    
+    <div class="control-group">
+        <label class="checkbox-label">
+            <input type="checkbox" id="trackAltitude" checked>
+            <span>Track Parent Altitude (跟踪父对象高度)</span>
+        </label>
+    </div>
+    
+    <div class="control-group">
+        <label>
+            SAR 覆盖角度 (Grazing Angle): <span class="value-display" id="angleValue">45°</span>
+        </label>
+        <input type="range" id="sarAngle" min="20" max="70" value="45" step="1">
+    </div>
+    
+    <div class="control-group">
+        <label>
+            覆盖宽度 (Swath Width): <span class="value-display" id="widthValue">1.5</span>
+        </label>
+        <input type="range" id="swathWidth" min="0.5" max="3.0" value="1.5" step="0.1">
+    </div>
+    
+    <div class="control-group">
+        <label>
+            固定高度 (Fixed Altitude): <span class="value-display" id="fixedAltValue">2.0</span>
+        </label>
+        <input type="range" id="fixedAltitude" min="1.5" max="4.0" value="2.0" step="0.1" disabled>
+    </div>
+    
+    <div class="control-group">
+        <label>
+            覆盖透明度 (Opacity): <span class="value-display" id="opacityValue">0.3</span>
+        </label>
+        <input type="range" id="sarOpacity" min="0.1" max="0.8" value="0.3" step="0.05">
+    </div>
+</div>
+
+<div id="info">
+    <h3>实时信息</h3>
+    <div>卫星高度: <span class="value-display" id="satAltitude">3.00</span></div>
+    <div>SAR高度: <span class="value-display" id="sarAltitude">3.00</span></div>
+    <div>模式: <span class="value-display" id="trackingMode">跟踪模式</span></div>
+</div>
+
+<script type="importmap">
+    {
+        "imports": {
+            "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+            "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+        }
+    }
+</script>
+
+<script type="module">
+    import * as THREE from 'three';
+    import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+    // --- 常量定义 ---
+    const EARTH_RADIUS = 1.0;
+    const INITIAL_ORBIT_RADIUS = 3.0;
+    const ORBIT_SPEED = 0.3;
+    const VERTICAL_VARIATION = 0.5;  // 卫星高度变化幅度
+    const EARTH_SURFACE_OFFSET = 0.1;  // SAR覆盖区域距地表的最小偏移
+    const OCCLUSION_THRESHOLD = 0.001;  // 遮挡检测的精度阈值
+    const EARTH_INTERSECTION_THRESHOLD = 0.02;  // 地球表面交点检测阈值
+
+    // --- 场景设置 ---
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+    camera.position.set(5, 3, 8);
+    
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    document.body.appendChild(renderer.domElement);
+
+    // --- 控制器 ---
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+    controls.dampingFactor = 0.05;
+
+    // --- 光照 ---
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+    scene.add(ambientLight);
+    
+    const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+    directionalLight.position.set(5, 5, 5);
+    scene.add(directionalLight);
+
+    // --- 创建地球 ---
+    const earthGeometry = new THREE.SphereGeometry(EARTH_RADIUS, 64, 64);
+    const earthMaterial = new THREE.MeshStandardMaterial({ 
+        color: 0x2E86AB,
+        roughness: 0.7,
+        metalness: 0.2
+    });
+    const earth = new THREE.Mesh(earthGeometry, earthMaterial);
+    scene.add(earth);
+
+    // 添加地球网格线
+    const gridHelper = new THREE.PolarGridHelper(EARTH_RADIUS, 16, 8, 64, 0x444444, 0x444444);
+    gridHelper.rotation.x = Math.PI / 2;
+    earth.add(gridHelper);
+
+    // --- 创建卫星组 ---
+    const satelliteGroup = new THREE.Group();
+    scene.add(satelliteGroup);
+    
+    satelliteGroup.position.set(0, 0, INITIAL_ORBIT_RADIUS);
+
+    // 卫星本体
+    const satelliteGeometry = new THREE.BoxGeometry(0.08, 0.08, 0.12);
+    const satelliteMaterial = new THREE.MeshStandardMaterial({ 
+        color: 0xffffff,
+        emissive: 0x888888,
+        metalness: 0.8,
+        roughness: 0.2
+    });
+    const satelliteMesh = new THREE.Mesh(satelliteGeometry, satelliteMaterial);
+    satelliteGroup.add(satelliteMesh);
+
+    // 卫星太阳能板
+    const panelGeometry = new THREE.BoxGeometry(0.3, 0.02, 0.12);
+    const panelMaterial = new THREE.MeshStandardMaterial({ 
+        color: 0x1e3a8a,
+        metalness: 0.7
+    });
+    const panel1 = new THREE.Mesh(panelGeometry, panelMaterial);
+    panel1.position.x = 0.15;
+    satelliteGroup.add(panel1);
+    
+    const panel2 = new THREE.Mesh(panelGeometry, panelMaterial);
+    panel2.position.x = -0.15;
+    satelliteGroup.add(panel2);
+
+    // --- SAR 参数 ---
+    let sarParams = {
+        trackAltitude: true,
+        angle: 45,
+        swathWidth: 1.5,
+        fixedAltitude: 2.0,
+        opacity: 0.3
+    };
+    
+    // 用于检测参数变化的缓存
+    let lastSarParams = { ...sarParams };
+
+    // --- 创建 SAR 覆盖锥体 (Side-looking SAR swath) ---
+    function createSARCoverage(satPos, earthPos, earthRad, angle, width) {
+        const distance = satPos.length();
+        
+        // 计算 SAR 覆盖的几何参数 - 侧视雷达从卫星侧面扫描
+        const angleRad = (angle * Math.PI) / 180;
+        const coverageLength = distance * 2.5;
+        
+        const sarGeometry = new THREE.BufferGeometry();
+        
+        // SAR 是侧视雷达，创建一个从卫星侧面延伸的扇形区域
+        const radialSegments = 32;  // 沿宽度方向的分段
+        const lengthSegments = 16;   // 沿长度方向的分段
+        const vertices = [];
+        const indices = [];
+        
+        // 生成 SAR 覆盖区域网格
+        // 从卫星侧面(x方向)开始，向下(y方向)和前方(z方向)扩展
+        for (let i = 0; i <= lengthSegments; i++) {
+            const distRatio = i / lengthSegments;
+            const currentDist = earthRad + EARTH_SURFACE_OFFSET + (coverageLength - earthRad) * distRatio;
+            
+            for (let j = 0; j <= radialSegments; j++) {
+                const widthRatio = j / radialSegments;
+                const currentAngle = angleRad * (widthRatio - 0.5);
+                
+                // 位置：侧视雷达主要在 x-y 平面扫描
+                const x = Math.sin(currentAngle) * width * (1 + distRatio * 0.5);
+                const y = -currentDist * Math.cos(angleRad * 0.3);
+                const z = -distRatio * width * 0.3; // 轻微的前向偏移
+                
+                vertices.push(x, y, z);
+            }
+        }
+        
+        // 生成三角形索引
+        for (let i = 0; i < lengthSegments; i++) {
+            for (let j = 0; j < radialSegments; j++) {
+                const a = i * (radialSegments + 1) + j;
+                const b = a + radialSegments + 1;
+                const c = a + 1;
+                const d = b + 1;
+                
+                indices.push(a, b, c);
+                indices.push(c, b, d);
+            }
+        }
+        
+        sarGeometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(vertices), 3));
+        sarGeometry.setIndex(indices);
+        sarGeometry.computeVertexNormals();
+        
+        return sarGeometry;
+    }
+
+    // --- SAR 材质 ---
+    const sarMaterial = new THREE.ShaderMaterial({
+        uniforms: {
+            fillColor: { value: new THREE.Color(0x00ff00) },
+            strokeColor: { value: new THREE.Color(0xffff00) },
+            fillOpacity: { value: sarParams.opacity },
+            earthCenter: { value: new THREE.Vector3(0, 0, 0) },
+            earthRadius: { value: EARTH_RADIUS },
+            satellitePosition: { value: new THREE.Vector3() },
+            occlusionThreshold: { value: OCCLUSION_THRESHOLD },
+            intersectionThreshold: { value: EARTH_INTERSECTION_THRESHOLD }
+        },
+        vertexShader: `
+            varying vec3 vWorldPosition;
+            varying vec3 vNormal;
+            
+            void main() {
+                vNormal = normalize(normalMatrix * normal);
+                vec4 worldPosition = modelMatrix * vec4(position, 1.0);
+                vWorldPosition = worldPosition.xyz;
+                gl_Position = projectionMatrix * viewMatrix * worldPosition;
+            }
+        `,
+        fragmentShader: `
+            varying vec3 vWorldPosition;
+            varying vec3 vNormal;
+            
+            uniform vec3 fillColor;
+            uniform vec3 strokeColor;
+            uniform float fillOpacity;
+            uniform vec3 earthCenter;
+            uniform float earthRadius;
+            uniform vec3 satellitePosition;
+            uniform float occlusionThreshold;
+            uniform float intersectionThreshold;
+            
+            float checkOcclusion() {
+                if (distance(vWorldPosition, satellitePosition) < occlusionThreshold) return 0.0;
+                
+                vec3 rayDir = normalize(vWorldPosition - satellitePosition);
+                vec3 oc = satellitePosition - earthCenter;
+                float b = dot(oc, rayDir);
+                float c = dot(oc, oc) - earthRadius * earthRadius;
+                float discriminant = b * b - c;
+                
+                if (discriminant > 0.0) {
+                    float t = -b - sqrt(discriminant);
+                    if (t > occlusionThreshold && t < distance(vWorldPosition, satellitePosition)) {
+                        return 1.0;
+                    }
+                }
+                return 0.0;
+            }
+            
+            void main() {
+                // 检查地球遮挡
+                if (checkOcclusion() > 0.5) discard;
+                
+                // 计算与地球表面的交点，用于描边
+                float distToEarth = distance(vWorldPosition, earthCenter);
+                float sphereSDF = distToEarth - earthRadius;
+                
+                // 边缘检测
+                bool onEarthIntersection = abs(sphereSDF) < intersectionThreshold;
+                
+                // 根据法线方向调整颜色强度
+                float fresnel = pow(1.0 - abs(dot(vNormal, normalize(vWorldPosition - satellitePosition))), 2.0);
+                
+                vec3 finalColor = onEarthIntersection ? strokeColor : fillColor;
+                float finalOpacity = onEarthIntersection ? 1.0 : fillOpacity;
+                
+                // 添加菲涅尔边缘高亮
+                finalColor = mix(finalColor, strokeColor, fresnel * 0.3);
+                
+                gl_FragColor = vec4(finalColor, finalOpacity);
+            }
+        `,
+        transparent: true,
+        side: THREE.DoubleSide,
+        depthWrite: false
+    });
+
+    // 初始 SAR 覆盖网格
+    let sarGeometry = createSARCoverage(
+        satelliteGroup.position, 
+        earth.position, 
+        EARTH_RADIUS,
+        sarParams.angle,
+        sarParams.swathWidth
+    );
+    const sarMesh = new THREE.Mesh(sarGeometry, sarMaterial);
+    sarMesh.rotation.x = -Math.PI / 2;
+    
+    // SAR 组用于独立控制高度
+    const sarGroup = new THREE.Group();
+    sarGroup.add(sarMesh);
+    satelliteGroup.add(sarGroup);
+
+    // --- 添加 SAR 指向指示器 (可选的可视化辅助线) ---
+    const beamIndicatorGeometry = new THREE.BufferGeometry();
+    const beamPoints = [
+        0, 0, 0,           // 起点在卫星
+        1.5, -2, 0,        // 指向 SAR 覆盖中心
+    ];
+    beamIndicatorGeometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(beamPoints), 3));
+    const beamIndicatorMaterial = new THREE.LineBasicMaterial({ 
+        color: 0xff6600, 
+        transparent: true, 
+        opacity: 0.6,
+        linewidth: 2
+    });
+    const beamIndicator = new THREE.Line(beamIndicatorGeometry, beamIndicatorMaterial);
+    sarGroup.add(beamIndicator);
+
+    // --- 轨道可视化线 ---
+    const orbitGeometry = new THREE.BufferGeometry();
+    const orbitPoints = [];
+    const orbitSegments = 128;
+    for (let i = 0; i <= orbitSegments; i++) {
+        const angle = (i / orbitSegments) * Math.PI * 2;
+        orbitPoints.push(
+            Math.sin(angle) * INITIAL_ORBIT_RADIUS,
+            0,
+            Math.cos(angle) * INITIAL_ORBIT_RADIUS
+        );
+    }
+    orbitGeometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(orbitPoints), 3));
+    const orbitMaterial = new THREE.LineBasicMaterial({ color: 0x444444, transparent: true, opacity: 0.5 });
+    const orbitLine = new THREE.Line(orbitGeometry, orbitMaterial);
+    scene.add(orbitLine);
+
+    // --- UI 控制 ---
+    const trackAltitudeCheckbox = document.getElementById('trackAltitude');
+    const sarAngleSlider = document.getElementById('sarAngle');
+    const swathWidthSlider = document.getElementById('swathWidth');
+    const fixedAltitudeSlider = document.getElementById('fixedAltitude');
+    const sarOpacitySlider = document.getElementById('sarOpacity');
+
+    trackAltitudeCheckbox.addEventListener('change', (e) => {
+        sarParams.trackAltitude = e.target.checked;
+        fixedAltitudeSlider.disabled = e.target.checked;
+        document.getElementById('trackingMode').textContent = 
+            e.target.checked ? '跟踪模式' : '固定高度模式';
+    });
+
+    sarAngleSlider.addEventListener('input', (e) => {
+        sarParams.angle = parseFloat(e.target.value);
+        document.getElementById('angleValue').textContent = sarParams.angle + '°';
+    });
+
+    swathWidthSlider.addEventListener('input', (e) => {
+        sarParams.swathWidth = parseFloat(e.target.value);
+        document.getElementById('widthValue').textContent = sarParams.swathWidth.toFixed(1);
+    });
+
+    fixedAltitudeSlider.addEventListener('input', (e) => {
+        sarParams.fixedAltitude = parseFloat(e.target.value);
+        document.getElementById('fixedAltValue').textContent = sarParams.fixedAltitude.toFixed(1);
+    });
+
+    sarOpacitySlider.addEventListener('input', (e) => {
+        sarParams.opacity = parseFloat(e.target.value);
+        document.getElementById('opacityValue').textContent = sarParams.opacity.toFixed(2);
+        sarMaterial.uniforms.fillOpacity.value = sarParams.opacity;
+    });
+
+    // --- 动画循环 ---
+    const clock = new THREE.Clock();
+    const satelliteWorldPos = new THREE.Vector3();
+
+    function animate() {
+        requestAnimationFrame(animate);
+        const elapsedTime = clock.getElapsedTime();
+
+        // 卫星轨道运动（垂直方向变化模拟椭圆轨道）
+        const orbitRadius = INITIAL_ORBIT_RADIUS + Math.sin(elapsedTime * ORBIT_SPEED * 2) * VERTICAL_VARIATION;
+        satelliteGroup.position.x = Math.sin(elapsedTime * ORBIT_SPEED) * orbitRadius;
+        satelliteGroup.position.y = Math.cos(elapsedTime * ORBIT_SPEED * 2) * VERTICAL_VARIATION * 0.3;
+        satelliteGroup.position.z = Math.cos(elapsedTime * ORBIT_SPEED) * orbitRadius;
+        
+        // 让卫星始终指向地球
+        satelliteGroup.lookAt(earth.position);
+        
+        // 获取卫星世界坐标
+        satelliteGroup.getWorldPosition(satelliteWorldPos);
+        const satelliteAltitude = satelliteWorldPos.length();
+        
+        // 更新 SAR 高度
+        let sarAltitude;
+        if (sarParams.trackAltitude) {
+            // 跟踪父对象（卫星）高度
+            sarAltitude = satelliteAltitude;
+            sarGroup.position.set(0, 0, 0); // SAR 与卫星同位置
+        } else {
+            // 使用固定高度
+            sarAltitude = sarParams.fixedAltitude;
+            // 计算 SAR 相对于卫星的偏移
+            const offset = sarParams.fixedAltitude - satelliteAltitude;
+            sarGroup.position.set(0, 0, offset);
+        }
+        
+        // 更新信息显示
+        document.getElementById('satAltitude').textContent = satelliteAltitude.toFixed(2);
+        document.getElementById('sarAltitude').textContent = sarAltitude.toFixed(2);
+
+        // 只在参数改变时重新创建 SAR 几何体（性能优化）
+        const paramsChanged = sarParams.angle !== lastSarParams.angle || 
+                             sarParams.swathWidth !== lastSarParams.swathWidth;
+        
+        if (paramsChanged) {
+            const newSarGeometry = createSARCoverage(
+                satelliteGroup.position,
+                earth.position,
+                EARTH_RADIUS,
+                sarParams.angle,
+                sarParams.swathWidth
+            );
+            sarMesh.geometry.dispose();
+            sarMesh.geometry = newSarGeometry;
+            
+            // 更新缓存
+            lastSarParams = { ...sarParams };
+        }
+
+        // 更新 shader uniforms
+        sarMaterial.uniforms.satellitePosition.value.copy(satelliteWorldPos);
+
+        controls.update();
+        renderer.render(scene, camera);
+    }
+
+    animate();
+
+    // --- 窗口调整 ---
+    window.addEventListener('resize', () => {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+</script>
+</body>
+</html>

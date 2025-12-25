@@ -1,3 +1,23 @@
+## Three.js 可视化项目
+
+欢迎来到我的 Three.js 可视化项目集合。
+
+### 项目列表
+
+1. **[SAR 合成孔径雷达覆盖模拟](sar.html)**
+   - 使用 Three.js 实现的 SAR (Synthetic Aperture Radar) 覆盖可视化
+   - 支持"Track Parent Altitude"功能，模拟 STK 的 SAR 传感器
+   - 可调节 SAR 参数：覆盖角度、宽度、透明度
+   - 实时显示卫星和 SAR 高度信息
+   - [查看详细文档](README_SAR.md)
+
+2. **[四棱锥与圆锥精确裁剪](tt.html)**
+   - 展示被四棱锥精确裁剪的圆锥体
+   - 使用自定义 Shader 实现复杂几何裁剪
+   - 动态地球遮挡检测
+
+---
+
 ## Welcome to GitHub Pages
 
 You can use the [editor on GitHub](https://github.com/liujaylin/liujaylin.github.io/edit/master/index.md) to maintain and preview the content for your website in Markdown files.
