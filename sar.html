@@ -227,53 +227,52 @@
         opacity: 0.3
     };
 
-    // --- 创建 SAR 覆盖锥体 ---
+    // --- 创建 SAR 覆盖锥体 (Side-looking SAR swath) ---
     function createSARCoverage(satPos, earthPos, earthRad, angle, width) {
         const distance = satPos.length();
         
-        // 计算 SAR 覆盖的几何参数
+        // 计算 SAR 覆盖的几何参数 - 侧视雷达从卫星侧面扫描
         const angleRad = (angle * Math.PI) / 180;
-        const coverageLength = distance * 2;
+        const coverageLength = distance * 2.5;
         
-        // 创建 SAR 覆盖区域几何体（使用圆台或自定义几何体）
         const sarGeometry = new THREE.BufferGeometry();
         
-        // SAR 扫描通常是侧视的，创建一个扇形覆盖区域
-        const segments = 32;
+        // SAR 是侧视雷达，创建一个从卫星侧面延伸的扇形区域
+        const radialSegments = 32;  // 沿宽度方向的分段
+        const lengthSegments = 16;   // 沿长度方向的分段
         const vertices = [];
         const indices = [];
         
-        // 顶点在卫星位置
-        const apex = new THREE.Vector3(0, 0, 0);
-        
-        // 生成扇形覆盖区域的顶点
-        for (let i = 0; i <= segments; i++) {
-            const t = i / segments;
-            const currentAngle = angleRad * (t - 0.5);
+        // 生成 SAR 覆盖区域网格
+        // 从卫星侧面(x方向)开始，向下(y方向)和前方(z方向)扩展
+        for (let i = 0; i <= lengthSegments; i++) {
+            const distRatio = i / lengthSegments;
+            const currentDist = earthRad + 0.1 + (coverageLength - earthRad) * distRatio;
             
-            // 近距离边缘点
-            const nearDist = earthRad + 0.2;
-            const nearX = Math.sin(currentAngle) * width;
-            const nearY = -nearDist;
-            const nearZ = 0;
-            
-            // 远距离边缘点
-            const farDist = coverageLength;
-            const farX = Math.sin(currentAngle) * width * 1.5;
-            const farY = -farDist;
-            const farZ = 0;
-            
-            vertices.push(nearX, nearY, nearZ);
-            vertices.push(farX, farY, farZ);
+            for (let j = 0; j <= radialSegments; j++) {
+                const widthRatio = j / radialSegments;
+                const currentAngle = angleRad * (widthRatio - 0.5);
+                
+                // 位置：侧视雷达主要在 x-y 平面扫描
+                const x = Math.sin(currentAngle) * width * (1 + distRatio * 0.5);
+                const y = -currentDist * Math.cos(angleRad * 0.3);
+                const z = -distRatio * width * 0.3; // 轻微的前向偏移
+                
+                vertices.push(x, y, z);
+            }
         }
         
         // 生成三角形索引
-        for (let i = 0; i < segments; i++) {
-            const base = i * 2;
-            // 第一个三角形
-            indices.push(base, base + 1, base + 2);
-            // 第二个三角形
-            indices.push(base + 1, base + 3, base + 2);
+        for (let i = 0; i < lengthSegments; i++) {
+            for (let j = 0; j < radialSegments; j++) {
+                const a = i * (radialSegments + 1) + j;
+                const b = a + radialSegments + 1;
+                const c = a + 1;
+                const d = b + 1;
+                
+                indices.push(a, b, c);
+                indices.push(c, b, d);
+            }
         }
         
         sarGeometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(vertices), 3));
@@ -376,6 +375,22 @@
     const sarGroup = new THREE.Group();
     sarGroup.add(sarMesh);
     satelliteGroup.add(sarGroup);
+
+    // --- 添加 SAR 指向指示器 (可选的可视化辅助线) ---
+    const beamIndicatorGeometry = new THREE.BufferGeometry();
+    const beamPoints = [
+        0, 0, 0,           // 起点在卫星
+        1.5, -2, 0,        // 指向 SAR 覆盖中心
+    ];
+    beamIndicatorGeometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(beamPoints), 3));
+    const beamIndicatorMaterial = new THREE.LineBasicMaterial({ 
+        color: 0xff6600, 
+        transparent: true, 
+        opacity: 0.6,
+        linewidth: 2
+    });
+    const beamIndicator = new THREE.Line(beamIndicatorGeometry, beamIndicatorMaterial);
+    sarGroup.add(beamIndicator);
 
     // --- 轨道可视化线 ---
     const orbitGeometry = new THREE.BufferGeometry();
