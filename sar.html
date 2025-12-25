@@ -148,6 +148,14 @@
     import * as THREE from 'three';
     import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
+    // --- 常量定义 ---
+    const EARTH_RADIUS = 1.0;
+    const INITIAL_ORBIT_RADIUS = 3.0;
+    const ORBIT_SPEED = 0.3;
+    const VERTICAL_VARIATION = 0.5;  // 卫星高度变化幅度
+    const EARTH_SURFACE_OFFSET = 0.1;  // SAR覆盖区域距地表的最小偏移
+    const OCCLUSION_THRESHOLD = 0.001;  // 遮挡检测的精度阈值
+
     // --- 场景设置 ---
     const scene = new THREE.Scene();
     const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
@@ -171,8 +179,7 @@
     scene.add(directionalLight);
 
     // --- 创建地球 ---
-    const earthRadius = 1.0;
-    const earthGeometry = new THREE.SphereGeometry(earthRadius, 64, 64);
+    const earthGeometry = new THREE.SphereGeometry(EARTH_RADIUS, 64, 64);
     const earthMaterial = new THREE.MeshStandardMaterial({ 
         color: 0x2E86AB,
         roughness: 0.7,
@@ -182,7 +189,7 @@
     scene.add(earth);
 
     // 添加地球网格线
-    const gridHelper = new THREE.PolarGridHelper(earthRadius, 16, 8, 64, 0x444444, 0x444444);
+    const gridHelper = new THREE.PolarGridHelper(EARTH_RADIUS, 16, 8, 64, 0x444444, 0x444444);
     gridHelper.rotation.x = Math.PI / 2;
     earth.add(gridHelper);
 
@@ -190,8 +197,7 @@
     const satelliteGroup = new THREE.Group();
     scene.add(satelliteGroup);
     
-    const initialOrbitRadius = 3.0;
-    satelliteGroup.position.set(0, 0, initialOrbitRadius);
+    satelliteGroup.position.set(0, 0, INITIAL_ORBIT_RADIUS);
 
     // 卫星本体
     const satelliteGeometry = new THREE.BoxGeometry(0.08, 0.08, 0.12);
@@ -226,6 +232,9 @@
         fixedAltitude: 2.0,
         opacity: 0.3
     };
+    
+    // 用于检测参数变化的缓存
+    let lastSarParams = { ...sarParams };
 
     // --- 创建 SAR 覆盖锥体 (Side-looking SAR swath) ---
     function createSARCoverage(satPos, earthPos, earthRad, angle, width) {
@@ -247,7 +256,7 @@
         // 从卫星侧面(x方向)开始，向下(y方向)和前方(z方向)扩展
         for (let i = 0; i <= lengthSegments; i++) {
             const distRatio = i / lengthSegments;
-            const currentDist = earthRad + 0.1 + (coverageLength - earthRad) * distRatio;
+            const currentDist = earthRad + EARTH_SURFACE_OFFSET + (coverageLength - earthRad) * distRatio;
             
             for (let j = 0; j <= radialSegments; j++) {
                 const widthRatio = j / radialSegments;
@@ -289,7 +298,7 @@
             strokeColor: { value: new THREE.Color(0xffff00) },
             fillOpacity: { value: sarParams.opacity },
             earthCenter: { value: new THREE.Vector3(0, 0, 0) },
-            earthRadius: { value: earthRadius },
+            earthRadius: { value: EARTH_RADIUS },
             satellitePosition: { value: new THREE.Vector3() }
         },
         vertexShader: `
@@ -364,7 +373,7 @@
     let sarGeometry = createSARCoverage(
         satelliteGroup.position, 
         earth.position, 
-        earthRadius,
+        EARTH_RADIUS,
         sarParams.angle,
         sarParams.swathWidth
     );
@@ -399,9 +408,9 @@
     for (let i = 0; i <= orbitSegments; i++) {
         const angle = (i / orbitSegments) * Math.PI * 2;
         orbitPoints.push(
-            Math.sin(angle) * initialOrbitRadius,
+            Math.sin(angle) * INITIAL_ORBIT_RADIUS,
             0,
-            Math.cos(angle) * initialOrbitRadius
+            Math.cos(angle) * INITIAL_ORBIT_RADIUS
         );
     }
     orbitGeometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(orbitPoints), 3));
@@ -453,13 +462,10 @@
         const elapsedTime = clock.getElapsedTime();
 
         // 卫星轨道运动（垂直方向变化模拟椭圆轨道）
-        const orbitSpeed = 0.3;
-        const verticalVariation = 0.5; // 高度变化幅度
-        
-        const orbitRadius = initialOrbitRadius + Math.sin(elapsedTime * orbitSpeed * 2) * verticalVariation;
-        satelliteGroup.position.x = Math.sin(elapsedTime * orbitSpeed) * orbitRadius;
-        satelliteGroup.position.y = Math.cos(elapsedTime * orbitSpeed * 2) * verticalVariation * 0.3;
-        satelliteGroup.position.z = Math.cos(elapsedTime * orbitSpeed) * orbitRadius;
+        const orbitRadius = INITIAL_ORBIT_RADIUS + Math.sin(elapsedTime * ORBIT_SPEED * 2) * VERTICAL_VARIATION;
+        satelliteGroup.position.x = Math.sin(elapsedTime * ORBIT_SPEED) * orbitRadius;
+        satelliteGroup.position.y = Math.cos(elapsedTime * ORBIT_SPEED * 2) * VERTICAL_VARIATION * 0.3;
+        satelliteGroup.position.z = Math.cos(elapsedTime * ORBIT_SPEED) * orbitRadius;
         
         // 让卫星始终指向地球
         satelliteGroup.lookAt(earth.position);
@@ -486,16 +492,24 @@
         document.getElementById('satAltitude').textContent = satelliteAltitude.toFixed(2);
         document.getElementById('sarAltitude').textContent = sarAltitude.toFixed(2);
 
-        // 重新创建 SAR 几何体（如果参数改变）
-        const newSarGeometry = createSARCoverage(
-            satelliteGroup.position,
-            earth.position,
-            earthRadius,
-            sarParams.angle,
-            sarParams.swathWidth
-        );
-        sarMesh.geometry.dispose();
-        sarMesh.geometry = newSarGeometry;
+        // 只在参数改变时重新创建 SAR 几何体（性能优化）
+        const paramsChanged = sarParams.angle !== lastSarParams.angle || 
+                             sarParams.swathWidth !== lastSarParams.swathWidth;
+        
+        if (paramsChanged) {
+            const newSarGeometry = createSARCoverage(
+                satelliteGroup.position,
+                earth.position,
+                EARTH_RADIUS,
+                sarParams.angle,
+                sarParams.swathWidth
+            );
+            sarMesh.geometry.dispose();
+            sarMesh.geometry = newSarGeometry;
+            
+            // 更新缓存
+            lastSarParams = { ...sarParams };
+        }
 
         // 更新 shader uniforms
         sarMaterial.uniforms.satellitePosition.value.copy(satelliteWorldPos);
