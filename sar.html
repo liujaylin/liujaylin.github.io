@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="zh">
+<html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
     <title>SAR 合成孔径雷达覆盖模拟</title>
@@ -155,6 +155,7 @@
     const VERTICAL_VARIATION = 0.5;  // 卫星高度变化幅度
     const EARTH_SURFACE_OFFSET = 0.1;  // SAR覆盖区域距地表的最小偏移
     const OCCLUSION_THRESHOLD = 0.001;  // 遮挡检测的精度阈值
+    const EARTH_INTERSECTION_THRESHOLD = 0.02;  // 地球表面交点检测阈值
 
     // --- 场景设置 ---
     const scene = new THREE.Scene();
@@ -299,7 +300,9 @@
             fillOpacity: { value: sarParams.opacity },
             earthCenter: { value: new THREE.Vector3(0, 0, 0) },
             earthRadius: { value: EARTH_RADIUS },
-            satellitePosition: { value: new THREE.Vector3() }
+            satellitePosition: { value: new THREE.Vector3() },
+            occlusionThreshold: { value: OCCLUSION_THRESHOLD },
+            intersectionThreshold: { value: EARTH_INTERSECTION_THRESHOLD }
         },
         vertexShader: `
             varying vec3 vWorldPosition;
@@ -322,9 +325,11 @@
             uniform vec3 earthCenter;
             uniform float earthRadius;
             uniform vec3 satellitePosition;
+            uniform float occlusionThreshold;
+            uniform float intersectionThreshold;
             
             float checkOcclusion() {
-                if (distance(vWorldPosition, satellitePosition) < 0.001) return 0.0;
+                if (distance(vWorldPosition, satellitePosition) < occlusionThreshold) return 0.0;
                 
                 vec3 rayDir = normalize(vWorldPosition - satellitePosition);
                 vec3 oc = satellitePosition - earthCenter;
@@ -334,7 +339,7 @@
                 
                 if (discriminant > 0.0) {
                     float t = -b - sqrt(discriminant);
-                    if (t > 0.001 && t < distance(vWorldPosition, satellitePosition)) {
+                    if (t > occlusionThreshold && t < distance(vWorldPosition, satellitePosition)) {
                         return 1.0;
                     }
                 }
@@ -350,7 +355,7 @@
                 float sphereSDF = distToEarth - earthRadius;
                 
                 // 边缘检测
-                bool onEarthIntersection = abs(sphereSDF) < 0.02;
+                bool onEarthIntersection = abs(sphereSDF) < intersectionThreshold;
                 
                 // 根据法线方向调整颜色强度
                 float fresnel = pow(1.0 - abs(dot(vNormal, normalize(vWorldPosition - satellitePosition))), 2.0);
